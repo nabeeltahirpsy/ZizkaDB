@@ -137,19 +137,18 @@ async def write_event(
     embed_on = embeddings_enabled()
     initial_status = "pending" if embed_on else "skipped"
 
-    # The agent row and its event counter are touched only inside the same
-    # transaction as the event INSERT, and the counter increments only
-    # after the insert succeeds. A failed insert therefore rolls back the
-    # agent row too — no phantom agents, no counter drift (fixes #230).
-    # New agents are counted from 1: the old ON CONFLICT upsert incremented
-    # only on conflict, so an agent's very first event was never counted.
+    # The agent upsert (which also maintains event_count, #235) and the
+    # event INSERT run inside one transaction: if the INSERT fails, the
+    # agent row and its counter increment roll back with it — no phantom
+    # agents, no counter drift (fixes #230).
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
                 """
-                INSERT INTO agents (agent_id, tenant_id)
-                VALUES ($1, $2)
-                ON CONFLICT (agent_id, tenant_id) DO NOTHING
+                INSERT INTO agents (agent_id, tenant_id, event_count)
+                VALUES ($1, $2, 1)
+                ON CONFLICT (agent_id, tenant_id)
+                DO UPDATE SET last_seen = NOW(), event_count = agents.event_count + 1
                 """,
                 agent,
                 tenant_id,
@@ -173,16 +172,6 @@ async def write_event(
                 checksum,
                 json.dumps(metadata) if metadata else None,
                 initial_status,
-            )
-
-            await conn.execute(
-                """
-                UPDATE agents
-                SET event_count = event_count + 1, last_seen = NOW()
-                WHERE agent_id = $1 AND tenant_id = $2
-                """,
-                agent,
-                tenant_id,
             )
 
     event_id = str(row["event_id"])
