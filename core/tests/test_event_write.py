@@ -99,43 +99,40 @@ async def test_write_event_success(
     assert result["indexed"] is True
     assert result["index_status"] == "indexed"
 
-    # Agent row ensure + counter increment run inside the transaction on
-    # the acquired connection; embedding update + usage meter stay outside.
-    assert conn.execute.await_count == 2
+    # Agent upsert runs inside the transaction on the acquired connection;
+    # embedding update + usage meter stay outside on the pool.
+    assert conn.execute.await_count == 1
     mock_qdrant.upsert.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_agent_ensure_does_not_increment_counter(mock_pool, mock_qdrant):
-    """Regression test for #230: the counter must increment exactly once,
-    after the event INSERT succeeds — and the first event of a new agent
-    must be counted (the old upsert incremented only ON CONFLICT)."""
+async def test_agent_upsert_counts_events_inside_transaction(mock_pool, mock_qdrant):
+    """The agent upsert maintains event_count itself (first event counts as
+    1 via the INSERT value, later events via ON CONFLICT DO UPDATE, #235) —
+    and it runs inside the same transaction as the event INSERT (#230)."""
     pool, conn = mock_pool
 
     await write_event(
         tenant_id="tenant1",
-        agent="brand-new-agent",
+        agent="agent1",
         event="message",
         data={"text": "hello"},
     )
 
     sql_calls = [call.args[0] for call in conn.execute.await_args_list]
-    assert len(sql_calls) == 2
-    # 1. ensure the agent row exists — without touching the counter
+    assert len(sql_calls) == 1
     assert "INSERT INTO agents" in sql_calls[0]
-    assert "ON CONFLICT (agent_id, tenant_id) DO NOTHING" in sql_calls[0]
-    assert "event_count" not in sql_calls[0]
-    # 2. the event insert happens between the two (fetchrow)
+    assert "event_count" in sql_calls[0]
+    assert "ON CONFLICT (agent_id, tenant_id)" in sql_calls[0]
+    assert "event_count = agents.event_count + 1" in sql_calls[0]
+    # The event INSERT ran on the same connection, inside the transaction.
     conn.fetchrow.assert_awaited_once()
-    # 3. counter increments only after the insert succeeded
-    assert "UPDATE agents" in sql_calls[1]
-    assert "event_count = event_count + 1" in sql_calls[1]
 
 
 @pytest.mark.asyncio
-async def test_failed_insert_never_touches_counter(mock_pool, mock_qdrant):
-    """Regression test for #230: if the event INSERT fails, the agent row
-    and its counter must roll back with it — no phantom agents."""
+async def test_failed_insert_rolls_back_agent_upsert(mock_pool, mock_qdrant):
+    """Regression test for #230: if the event INSERT fails, the agent upsert
+    must roll back with it — no phantom agents, no counter drift."""
     pool, conn = mock_pool
     conn.fetchrow.side_effect = RuntimeError("boom")
 
@@ -147,10 +144,10 @@ async def test_failed_insert_never_touches_counter(mock_pool, mock_qdrant):
             data={"text": "hello"},
         )
 
-    # Only the agent ensure ran; the counter UPDATE never executed.
+    # The upsert ran inside the transaction...
     assert conn.execute.await_count == 1
     txn_cm = conn.transaction.return_value
-    # __aexit__ received the exception -> transaction rolled back.
+    # ...and __aexit__ received the exception -> transaction rolled back.
     exit_call = txn_cm.__aexit__.await_args
     assert exit_call.args[0] is RuntimeError
 
