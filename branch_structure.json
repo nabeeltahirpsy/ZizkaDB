@@ -1,0 +1,21 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "fix/230-malformed-event-input-500",
+    "fix/234-embedding-worker-forget-race",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "fix/230-malformed-event-input-500": "main",
+    "fix/234-embedding-worker-forget-race": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "fix/230-malformed-event-input-500",
+    "fix/234-embedding-worker-forget-race",
+    "origin"
+  ]
+}

@@ -1,9 +1,6 @@
 # Environment
-.env
 *.env
-.env.local
 *.env.local
-.env.staging
 infra/.env.staging
 
 # Python
@@ -38,7 +35,6 @@ redis_data/
 
 # IDE
 .idea/
-.vscode/
 .cursor/mcp.json
 .mcp.json
 *.swp
@@ -65,3 +61,4 @@ default.profraw
 
 # Agents
 .agents/
+config.bat
