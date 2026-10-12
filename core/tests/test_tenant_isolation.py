@@ -63,8 +63,8 @@ async def test_write_event_rejects_nonexistent_parent(mock_pool):
 
 @pytest.mark.asyncio
 async def test_write_event_allows_same_tenant_parent(mock_pool):
-    """write_event runs the agent ensure + event INSERT + counter bump inside
-    one transaction on an acquired connection (no phantom agents on failed
+    """write_event runs the agent upsert + event INSERT inside one
+    transaction on an acquired connection (no phantom agents on failed
     writes, #230). The mock pool must yield a connection for that path."""
     from unittest.mock import MagicMock
 
@@ -93,7 +93,7 @@ async def test_write_event_allows_same_tenant_parent(mock_pool):
     )
 
     assert result["event_id"] == "44444444-4444-4444-4444-444444444444"
-    assert conn.execute.await_count == 2  # agent ensure + counter increment
+    assert conn.execute.await_count == 1  # agent upsert (it maintains event_count itself)
 
 
 def _transition_sql(pool):
