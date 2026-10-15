@@ -349,54 +349,71 @@ async def forget(
     # constraining the SELECT is sufficient.
     scoped_agent = tenant.get("agent_id")
 
-    # Find matching event IDs
-    rows = await pool.fetch(
-        """
-        SELECT event_id
-        FROM events
-        WHERE tenant_id = $1
-          AND data->$2 = to_jsonb($3::text)
-          AND ($4::text IS NULL OR agent_id = $4)
-        """,
-        tenant_id,
-        body.filter_key,
-        body.filter_value,
-        scoped_agent,
-    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Find matching event IDs
+            rows = await conn.fetch(
+                """
+                SELECT event_id
+                FROM events
+                WHERE tenant_id = $1
+                  AND data->$2 = to_jsonb($3::text)
+                  AND ($4::text IS NULL OR agent_id = $4)
+                """,
+                tenant_id,
+                body.filter_key,
+                body.filter_value,
+                scoped_agent,
+            )
 
-    if not rows:
-        return {
-            "deleted_events": 0,
-            "filter": {
-                "key": body.filter_key,
-                "value": body.filter_value,
-            },
-            "message": "No matching events found",
-        }
+            if not rows:
+                return {
+                    "deleted_events": 0,
+                    "filter": {
+                        "key": body.filter_key,
+                        "value": body.filter_value,
+                    },
+                    "message": "No matching events found",
+                }
 
-    event_ids = [r["event_id"] for r in rows]
-    deleted = len(event_ids)
+            event_ids = [r["event_id"] for r in rows]
+            deleted = len(event_ids)
 
-    # Vectors first: if the search index can't be cleaned, keep the Postgres
-    # rows so a retry can still find (and delete) the vectors. Deleting a
-    # missing Qdrant point is a no-op, so retries are idempotent.
-    vector_cleanup = await _delete_vectors(event_ids, tenant_id)
-    if not vector_cleanup and embeddings_enabled():
-        raise service_unavailable(
-            "Search index unavailable; nothing was deleted. Retry forget shortly."
-        )
+            # Serialize against the embedding worker (#234): take the
+            # per-event advisory lock (the codebase's pattern, cf.
+            # services/api_keys) before deleting vectors and rows, so a
+            # worker that already selected one of these events cannot
+            # recreate its vector once the deletion commits. Locks are
+            # taken in sorted order so concurrent forgets cannot
+            # deadlock, and released when the transaction ends.
+            for eid in sorted(event_ids, key=str):
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1))", str(eid)
+                )
 
-    # PostgreSQL does not support aggregate functions in RETURNING clauses.
-    # We already know the count from the SELECT above, so use that directly.
-    await pool.execute(
-        """
-        DELETE FROM events
-        WHERE tenant_id = $1
-          AND event_id = ANY($2::uuid[])
-        """,
-        tenant_id,
-        event_ids,
-    )
+            # Vectors first: if the search index can't be cleaned, keep
+            # the Postgres rows so a retry can still find (and delete)
+            # the vectors. Deleting a missing Qdrant point is a no-op,
+            # so retries are idempotent. Raising here rolls the
+            # transaction back, so nothing is deleted.
+            vector_cleanup = await _delete_vectors(event_ids, tenant_id)
+            if not vector_cleanup and embeddings_enabled():
+                raise service_unavailable(
+                    "Search index unavailable; nothing was deleted. Retry forget shortly."
+                )
+
+            # PostgreSQL does not support aggregate functions in RETURNING
+            # clauses. We already know the count from the SELECT above, so
+            # use that directly.
+            await conn.execute(
+                """
+                DELETE FROM events
+                WHERE tenant_id = $1
+                  AND event_id = ANY($2::uuid[])
+                """,
+                tenant_id,
+                event_ids,
+            )
 
     # Never log the forgotten value itself (it is usually personal data).
     log.info(

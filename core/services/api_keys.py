@@ -178,6 +178,12 @@ async def claim_unassigned_api_key(
         from db.connection import get_pool
 
         pool = get_pool()
+    # Binding a key to a new agent name creates that agent: the plan must
+    # have room for it (409 otherwise; the key stays unassigned).
+    from services.agent_limits import reserve_agent_slot
+
+    await reserve_agent_slot(pool, tenant_id=tenant_id, agent_id=agent_id)
+
     async with pool.acquire() as conn:
         await conn.execute(
             """
